@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LastCup - when is your last safe coffee?</title>
+<style>
+  :root { --bg:#16130f; --panel:#211c15; --line:#3a3226; --text:#f4efe7; --dim:#a89e8d; --accent:#d9a45b; --good:#8be0a4; --bad:#e07a6a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:26px 14px 44px; }
+  h1 { font-size:30px; }
+  .sub { color:var(--dim); margin:6px 0 18px; font-size:14px; text-align:center; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; width:min(560px, 94vw); margin-bottom:14px; }
+  .card h2 { font-size:15px; margin-bottom:10px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  select, input { background:#16110b; border:1px solid var(--line); border-radius:8px; color:var(--text); padding:9px 12px; font-size:14px; }
+  label { color:var(--dim); font-size:13px; }
+  button { background:var(--accent); color:#16130f; border:none; border-radius:8px; padding:9px 16px; font-size:14px; font-weight:700; cursor:pointer; }
+  .dose { display:flex; justify-content:space-between; align-items:center; background:#16110b; border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin-top:6px; font-size:14px; }
+  .dose .rm { color:var(--dim); cursor:pointer; }
+  .dose .rm:hover { color:var(--bad); }
+  #verdict { text-align:center; }
+  #verdict .big { font-size:26px; font-weight:900; }
+  #verdict .why { color:var(--dim); margin-top:8px; font-size:14px; line-height:1.6; }
+  .good { color:var(--good); } .bad { color:var(--bad); }
+  .meter { height:8px; background:#16110b; border-radius:4px; margin-top:12px; overflow:hidden; }
+  .meter > div { height:100%; background:var(--accent); border-radius:4px; transition:width .3s; }
+  .foot { margin-top:14px; color:var(--dim); font-size:13px; }
+  a { color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<h1>LastCup</h1>
+<div class="sub">caffeine takes ~5 hours to halve in your blood - here's when your last one has to be</div>
+
+<div class="card">
+  <h2>You</h2>
+  <div class="row">
+    <label>Bedtime <input type="time" id="bedtime" value="23:30"></label>
+    <label>Metabolism
+      <select id="metab">
+        <option value="4">Fast (4h half-life)</option>
+        <option value="5" selected>Average (5h)</option>
+        <option value="6.5">Sensitive (6.5h)</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Today's caffeine</h2>
+  <div class="row">
+    <select id="drink"></select>
+    <input type="time" id="dose-time">
+    <button id="add">Log it</button>
+  </div>
+  <div id="doses"></div>
+</div>
+
+<div class="card" id="verdict">
+  <div class="big" id="big"></div>
+  <div class="meter"><div id="meter-fill" style="width:0%"></div></div>
+  <div class="why" id="why"></div>
+</div>
+
+<div class="foot"><a href="index.html">&larr; about</a></div>
+
+<script src="engine.js?v=1"></script>
+<script>
+(function () {
+  var BUDGET_MG = 25; // residual mg at bedtime that sleep research treats as "won't bother you"
+
+  var drinkSel = document.getElementById('drink');
+  LastCup.DRINKS.forEach(function (d, i) {
+    var o = document.createElement('option');
+    o.value = i;
+    o.textContent = d.name + ' (' + d.mg + 'mg)';
+    drinkSel.appendChild(o);
+  });
+
+  function todayKey() {
+    var d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  }
+
+  var state = { doses: [] }; // {mg, hhmm}
+
+  function save() {
+    try {
+      localStorage.setItem('lastcup-' + todayKey(), JSON.stringify(state.doses));
+      localStorage.setItem('lastcup-settings', JSON.stringify({ bed: document.getElementById('bedtime').value, metab: document.getElementById('metab').value }));
+    } catch (e) {}
+  }
+  function load() {
+    try {
+      var d = JSON.parse(localStorage.getItem('lastcup-' + todayKey()));
+      if (Array.isArray(d)) state.doses = d;
+      var s = JSON.parse(localStorage.getItem('lastcup-settings'));
+      if (s) {
+        if (s.bed) document.getElementById('bedtime').value = s.bed;
+        if (s.metab) document.getElementById('metab').value = s.metab;
+      }
+    } catch (e) {}
+  }
+
+  function hoursNow() {
+    var n = new Date();
+    return n.getHours() + n.getMinutes() / 60;
+  }
+  function hhmmToHours(s) {
+    var p = s.split(':');
+    return +p[0] + (+p[1]) / 60;
+  }
+  function hoursToHhmm(h) {
+    h = ((h % 24) + 24) % 24;
+    var hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    if (mm === 60) { hh = (hh + 1) % 24; mm = 0; }
+    return String(hh).padStart(2,'0') + ':' + String(mm).padStart(2,'0');
+  }
+
+  function hoursToBed() {
+    var bed = hhmmToHours(document.getElementById('bedtime').value);
+    var now = hoursNow();
+    var diff = bed - now;
+    if (diff < 0) diff += 24; // bedtime tomorrow
+    return diff;
+  }
+
+  function dosesAsEngine() {
+    var now = hoursNow();
+    return state.doses.map(function (d) {
+      var t = hhmmToHours(d.hhmm);
+      var ago = now - t;
+      if (ago < 0) ago += 24;
+      return { mg: d.mg, hoursAgo: ago };
+    });
+  }
+
+  function renderDoses() {
+    var el = document.getElementById('doses');
+    el.innerHTML = '';
+    state.doses.forEach(function (d, i) {
+      var row = document.createElement('div');
+      row.className = 'dose';
+      row.innerHTML = '<span>' + d.mg + 'mg at ' + d.hhmm + '</span><span class="rm" data-i="' + i + '">remove</span>';
+      el.appendChild(row);
+    });
+    el.querySelectorAll('.rm').forEach(function (x) {
+      x.addEventListener('click', function () {
+        state.doses.splice(+x.getAttribute('data-i'), 1);
+        save(); renderDoses(); update();
+      });
+    });
+  }
+
+  function update() {
+    var metab = parseFloat(document.getElementById('metab').value);
+    var htb = hoursToBed();
+    var doses = dosesAsEngine();
+    // verdict for one more standard filter coffee
+    var v = LastCup.verdict(doses, htb, 95, BUDGET_MG, metab);
+    var atBed = v.atBedNow;
+    var big = document.getElementById('big');
+    var why = document.getElementById('why');
+    var fill = document.getElementById('meter-fill');
+
+    var pct = Math.min(100, Math.round(atBed / 100 * 100));
+    fill.style.width = pct + '%';
+    fill.style.background = atBed <= BUDGET_MG ? 'var(--good)' : (atBed <= 60 ? 'var(--accent)' : 'var(--bad)');
+
+    var nowH = hoursNow();
+    if (v.overBudget) {
+      big.innerHTML = '<span class="bad">Decaf only tonight</span>';
+      why.innerHTML = 'You are already projected to have <b>' + Math.round(atBed) + 'mg</b> in your system at bedtime (' + document.getElementById('bedtime').value + ') - over the ' + BUDGET_MG + 'mg sleep-friendly line. Any more caffeine tonight is a sleep tax.';
+    } else if (!v.canStill) {
+      big.innerHTML = '<span class="bad">That ship has sailed</span>';
+      var ago = nowH - v.latestDoseHoursFromNow;
+      why.innerHTML = 'Your last safe coffee (95mg) was about <b>' + hoursToHhmm(v.latestDoseHoursFromNow) + '</b>. You are at <b>' + Math.round(atBed) + 'mg</b> of the ' + BUDGET_MG + 'mg budget at bedtime - a new coffee would push you over.';
+    } else {
+      var cutoffClock = hoursToHhmm(nowH + v.latestDoseHoursFromNow);
+      big.innerHTML = 'Last coffee by <span class="good">' + cutoffClock + '</span>';
+      why.innerHTML = 'Projected at bedtime: <b>' + Math.round(atBed) + 'mg</b> of your ' + BUDGET_MG + 'mg budget. A 95mg coffee right now would decay to ~' + Math.round(LastCup.residualMg(95, htb, metab)) + 'mg by bedtime.';
+    }
+  }
+
+  document.getElementById('add').addEventListener('click', function () {
+    var d = LastCup.DRINKS[+drinkSel.value];
+    var t = document.getElementById('dose-time').value;
+    if (!t) return;
+    state.doses.push({ mg: d.mg, hhmm: t });
+    state.doses.sort(function (a, b) { return a.hhmm < b.hhmm ? -1 : 1; });
+    save(); renderDoses(); update();
+  });
+  document.getElementById('bedtime').addEventListener('change', function () { save(); update(); });
+  document.getElementById('metab').addEventListener('change', function () { save(); update(); });
+
+  // default dose time to now
+  var n = new Date();
+  document.getElementById('dose-time').value = String(n.getHours()).padStart(2,'0') + ':' + String(n.getMinutes()).padStart(2,'0');
+
+  // test hook
+  window.__lc = {
+    set: function (bedtime, metab, doses) {
+      document.getElementById('bedtime').value = bedtime;
+      document.getElementById('metab').value = String(metab);
+      state.doses = doses.slice();
+      renderDoses(); update();
+    },
+    verdict: function () { return { big: document.getElementById('big').textContent, why: document.getElementById('why').textContent }; }
+  };
+
+  load();
+  renderDoses();
+  update();
+})();
+</script>
+</body>
+</html>
